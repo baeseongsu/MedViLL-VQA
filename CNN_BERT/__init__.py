@@ -1,1 +1,0 @@
-from main_cnn_bert import CNN_BERT
