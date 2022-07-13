@@ -1,8 +1,8 @@
 PATH_ITR=/home/dekyung/seongsu_temp/MedViLL-VQA/downstream_task/medical_vqa/pretrained_model/par/pytorch_model.bin
 EXP_NAME=medvill_ne100_bsz32_chest
-CUDA_VISIBLE_DEVICES=4 python -m torch.distributed.launch \
+CUDA_VISIBLE_DEVICES=6 python -m torch.distributed.launch \
 --nproc_per_node=1 \
---master_port 9872 \
+--master_port 9878 \
 --use_env ./downstream_task/medical_vqa/finetune_modified.py \
 --model_recover_path ${PATH_ITR} \
 --tasks vqa \

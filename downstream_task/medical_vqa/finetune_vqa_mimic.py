@@ -3,6 +3,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 import datetime
+from multiprocessing.sharedctypes import Value
 import os
 
 now = datetime.datetime.now()
@@ -105,34 +106,42 @@ def main(args):
     # os.environ['MASTER_ADDR'] = '127.0.0.1'
     # os.environ['MASTER_PORT'] = '3412'
 
+    # NOTE: load pre-trained model
+    if args.model_recover_path != None:
+        args.config_path = os.path.join(os.path.dirname(args.model_recover_path), "config.json")
+    else:
+        args.model_recover_path = "/home/edlab/jhmoon/mimic_mv_real/mimic-cxr/pre-train/_2/base_PAR_36,128/pytorch_model.bin"
+        args.config_path = os.path.join(os.path.dirname(args.model_recover_path), "config.json")
+
     # set experiment name
     if args.model_recover_path != None:
         if args.exp_name == "":
             args.exp_name = args.model_recover_path.split("/")[-2]
     else:
-        args.exp_name = "finetune_only"
+        raise ValueError()
 
     # set output directory
-    # args.output_dir = args.output_dir + str(args.tasks) + "/" + args.model_recover_path.split("/")[-3] + "_" + args.generation_dataset + "_" + args.exp_name
     args.output_dir = os.path.join(args.output_dir, f"""{args.model_recover_path.split("/")[-3]}_{args.exp_name}""")
     print("args.output_dir", args.output_dir)
     print("global_rank: {}, local rank: {}".format(args.global_rank, args.local_rank))
 
     args.max_seq_length = args.max_len_b + args.len_vis_input + 3  # +3 for 2x[SEP] and [CLS]
-    # args.dist_url = args.dist_url.replace('[PT_OUTPUT_DIR]', args.output_dir)
-    if args.model_recover_path != None:
-        args.config_path = args.model_recover_path.split("/")[:-1]
-        args.config_path = ("/").join(args.config_path) + "/config.json"
-    else:
-        args.config_path = "/home/edlab/jhmoon/mimic_mv_real/mimic-cxr/pre-train/base_PAR_36,128/pytorch_model.bin".split("/")[:-1]
-        args.config_path = ("/").join(args.config_path) + "/config.json"
 
     # define file path
-    # args.src_file = '../../data/vqa_rad/data_RAD'
-    args.src_file = "/home/data_storage/mimic-cxr/dataset/data_RAD"
-    args.img_path = "/home/data_storage/mimic-cxr/dataset/vqa_image/vqa_512_3ch"
-    args.train_dataset = "/home/data_storage/mimic-cxr/dataset/data_RAD/trainet.json"
-    args.file_valid_jpgs = "../../data/vqa_rad/vqa_rad_original_set.json"
+    if args.vqa_dataset == "vqa-rad":
+        # args.src_file = '../../data/vqa_rad/data_RAD'
+        args.src_file = "/home/data_storage/mimic-cxr/dataset/data_RAD"
+        args.img_path = "/home/data_storage/mimic-cxr/dataset/vqa_image/vqa_512_3ch"
+        args.train_dataset = "/home/data_storage/mimic-cxr/dataset/data_RAD/trainet.json"
+        # args.file_valid_jpgs = "../../data/vqa_rad/vqa_rad_original_set.json"
+    elif args.vqa_dataset == "vqa-mimic":
+        # TODO:
+        args.src_file = None
+        args.img_path = None
+        args.train_dataset = None
+        # args.file_valid_jpgs = None
+    else:
+        raise ValueError()
 
     print(" # PID :", os.getpid())
     os.makedirs(args.output_dir, exist_ok=True)
@@ -175,49 +184,30 @@ def main(args):
     tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=True)
 
     # build preprocessing pipeline
-    bi_uni_pipeline = [
-        None,  # In this s2s slot, there is nothing to do
-        data_loader.Preprocess4Seq2seq(
-            args,
-            args.max_pred,
-            0,  # args.mask_prob,
-            list(tokenizer.vocab.keys()),
-            tokenizer.convert_tokens_to_ids,
-            args.max_seq_length,
-            args.bar,
-            new_segment_ids=args.new_segment_ids,
-            truncate_config={"max_len_b": args.max_len_b, "trunc_seg": args.trunc_seg, "always_truncate_tail": args.always_truncate_tail},
-            mode="bi",
-            len_vis_input=args.len_vis_input,
-            local_rank=args.local_rank,
-            load_vqa_set=(args.tasks == "vqa"),
-        ),
-    ]
+    from data_loader import PipelineForVQARAD
+
+    preproc_pipeline = PipelineForVQARAD(
+        args=args,
+        tokenizer=tokenizer,
+        max_seq_len=args.max_seq_length,
+        len_vis_input=args.len_vis_input,
+    )
 
     # get train dataset
-    train_dataset = data_loader.Img2txtDataset(
-        args,
-        "train",  # args.data_set,
-        args.src_file,
-        args.image_root,
-        "train",
-        args.train_batch_size,
-        tokenizer,
-        args.max_seq_length,
-        file_valid_jpgs=args.file_valid_jpgs,
-        bi_uni_pipeline=bi_uni_pipeline,
-        use_num_imgs=args.use_num_imgs,
-        s2s_prob=0,  # this must be set to 0.
-        bi_prob=1,  # this must be set to 1.
-        tasks=args.tasks,
+    from data_loader import VQARADDataset
+
+    train_dataset = VQARADDataset(
+        args=args,
+        split="train",
+        file_src=args.src_file,  # "/home/data_storage/mimic-cxr/dataset/data_RAD"
+        img_root=args.img_path,
+        batch_size=args.train_batch_size,
+        tokenizer=tokenizer,
+        preproc_pipeline=preproc_pipeline,
     )
+
     # get train sampler
     train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-
-    # if args.world_size == 1:
-    #     train_sampler = RandomSampler(train_dataset)
-    # else:
-    #     train_sampler = DistributedSampler(train_dataset)
 
     # get train dataloader
     train_dataloader = torch.utils.data.DataLoader(
@@ -229,31 +219,21 @@ def main(args):
         pin_memory=True,
     )
 
-    # NOTE: temporary
-    eval_batch_size = 32
-
     # get eval dataset
-    eval_dataset = data_loader.Img2txtDataset(
-        args,
-        "test",
-        args.src_file,
-        args.image_root,
-        "test",
-        eval_batch_size,  # args.train_batch_size,
-        tokenizer,
-        args.max_seq_length,
-        file_valid_jpgs=args.file_valid_jpgs,
-        bi_uni_pipeline=bi_uni_pipeline,
-        use_num_imgs=args.use_num_imgs,
-        s2s_prob=args.s2s_prob,
-        bi_prob=args.bi_prob,
-        tasks=args.tasks,
+    eval_dataset = VQARADDataset(
+        args=args,
+        split="test",
+        file_src=args.src_file,  # "/home/data_storage/mimic-cxr/dataset/data_RAD"
+        img_root=args.img_path,
+        batch_size=args.train_batch_size,
+        tokenizer=tokenizer,
+        preproc_pipeline=preproc_pipeline,
     )
 
     # define dataloader
     eval_dataloader = DataLoader(
         eval_dataset,
-        batch_size=eval_batch_size,  # args.train_batch_size,
+        batch_size=args.train_batch_size,
         num_workers=args.num_workers,
         shuffle=False,
         collate_fn=batch_list_to_batch_tensors,
@@ -265,41 +245,17 @@ def main(args):
     # prepare model
     recover_step = _get_max_epoch_model(args.output_dir)
     cls_num_labels = 2  # TODO: vqa-rad (458), vqa-mimic (??)
-    type_vocab_size = 6 if args.new_segment_ids else 2
+    type_vocab_size = 2
     relax_projection = 4 if args.relax_projection else 0
     # task_idx_proj = 3 if args.tasks == "report_generation" else 0
     task_idx_proj = 0
 
     # BERT model will be loaded! from scratch
     if args.model_recover_path is None:
-        _state_dict = {} if args.from_scratch else None
-        _state_dict = {}
-
-        model = MedViLLForVQA.from_pretrained(
-            args.bert_model,
-            state_dict=_state_dict,
-            args=args,
-            num_labels=cls_num_labels,
-            type_vocab_size=type_vocab_size,
-            relax_projection=relax_projection,
-            config_path=args.config_path,
-            task_idx=task_idx_proj,
-            max_position_embeddings=args.max_position_embeddings,
-            label_smoothing=args.label_smoothing,
-            fp32_embedding=args.fp32_embedding,
-            cache_dir=args.output_dir + "/.pretrained_model_{}".format(args.global_rank),
-            drop_prob=args.drop_prob,
-            # len_vis_input=args.len_vis_input,
-            # tasks=args.tasks,
-        )
-
-        print("scratch model's statedict : ")
-        for param_tensor in model.state_dict():
-            print(param_tensor, "\t", model.state_dict()[param_tensor].size())
-        print("The model will train from scratch")
-
+        raise ValueError()
     else:
-        print("Task :", args.tasks, args.s2s_prob)
+        # print("Task :", args.tasks, args.s2s_prob)
+        model_recover = None
         for model_recover_path in glob.glob(args.model_recover_path.strip()):
             print("Recover path: ", model_recover_path)
             logger.info("***** Recover model: %s *****", args.model_recover_path)
@@ -395,7 +351,7 @@ def main(args):
 
                     # prepare inputs
                     batch = [t.to(device) for t in batch]
-                    input_ids, segment_ids, input_mask, lm_label_ids, masked_pos, masked_weights, task_idx, img, vis_pe, ans_labels, ans_type, organ = batch
+                    input_ids, segment_ids, attention_mask, img, vis_pe, ans_labels, ans_type, _organ = batch
 
                     # half precision
                     if args.fp16:
@@ -408,13 +364,8 @@ def main(args):
                         vis_pe,
                         input_ids,
                         segment_ids,
-                        input_mask,
-                        lm_label_ids,
+                        attention_mask,
                         ans_labels,
-                        masked_pos=masked_pos,
-                        masked_weights=masked_weights,
-                        task_idx=task_idx,
-                        drop_worst_ratio=args.max_drop_worst_ratio if i_epoch > args.drop_after else 0,
                         ans_type=ans_type,
                     )
 
@@ -509,7 +460,7 @@ def evaluate_vqa_model(args, model, eval_dataloader):
 
             # prepare inputs
             batch = [t.to(args.device) for t in batch]
-            input_ids, segment_ids, input_mask, lm_label_ids, masked_pos, masked_weights, task_idx, img, vis_pe, ans_labels, ans_type, organ = batch
+            input_ids, segment_ids, attention_mask, img, vis_pe, ans_labels, ans_type, _organ = batch
 
             # half precision
             if args.fp16:
@@ -522,13 +473,8 @@ def evaluate_vqa_model(args, model, eval_dataloader):
                 vis_pe,
                 input_ids,
                 segment_ids,
-                input_mask,
-                lm_label_ids,
+                attention_mask,
                 ans_labels,
-                masked_pos=masked_pos,
-                masked_weights=masked_weights,
-                task_idx=task_idx,
-                drop_worst_ratio=args.max_drop_worst_ratio,
                 ans_type=ans_type,
             )
             _, vqa_loss, vqa_score, closed_score, open_score = loss_tuple
@@ -566,51 +512,65 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--seed", type=int, default=1234, help="random seed for initialization")
-    # parser.add_argument("--generation_dataset", default="mimic-cxr", type=str, help=["mimic-cxr, openi"])
-    parser.add_argument("--vqa_rad", default="all", type=str, choices=["all", "chest", "head", "abd"])
-    # parser.add_argument("--data_set", default="train", type=str, help="train | valid")
-    parser.add_argument("--img_hidden_sz", type=int, default=2048, help="Whether to use amp for fp16")
-    # parser.add_argument("--random_bootstrap_testnum", type=int, default=30, help="Random bootstrap num of Iteration")
-    parser.add_argument("--bert_model", default="bert-base-uncased", type=str, help="Bert pre-trained model selected in the list: bert-base-cased, bert-large-cased.")
+    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--bert_model", type=str, default="bert-base-uncased")
 
-    # parser.add_argument("--mlm_task", type=str, default=True, help="The model will train only mlm task!! | True | False")
-    parser.add_argument("--vqa_eval", action="store_true", help="vqa_eval | True | False")
-
-    parser.add_argument("--train_batch_size", default=16, type=int, help="Total batch size for training.")
-    parser.add_argument("--num_train_epochs", default=50, type=int, help="Total number of training epochs to perform.")
-    parser.add_argument("--from_scratch", action="store_true", default=False, help="Initialize parameters with random values (i.e., training from scratch).")
+    # model
+    parser.add_argument("--model_recover_path", default=None, type=str, help="The file of fine-tuned pretraining model. ex)'./pretrained_model/pytorch_model.bin'")
+    parser.add_argument("--len_vis_input", type=int, default=256, help="The length of visual token input")
     parser.add_argument("--img_encoding", type=str, default="fully_use_cnn", choices=["random_sample", "fully_use_cnn"])
-    parser.add_argument("--len_vis_input", type=int, default=256, help="The length of visual token input")  # visual token의 fixed length를 100이라 하면, <Unknown> token 100개가 되고, 100개의 word 생성 가능.
-    parser.add_argument("--max_len_b", type=int, default=253, help="Truncate_config: maximum length of segment B.")
-    parser.add_argument("--mask_prob", default=0.0, type=float, help="Number of prediction is sometimes less than max_pred when sequence is short.")
-
-    parser.add_argument("--max_pred", type=int, default=3, help="Max tokens of prediction.")
-    parser.add_argument(
-        "--s2s_prob", default=0, type=float, help="Percentage of examples that are bi-uni-directional LM (seq2seq). This must be turned off!!!!!!! because this is not for seq2seq model!!!"
-    )
-    parser.add_argument("--bi_prob", default=1, type=float, help="Percentage of examples that are bidirectional LM.")
     parser.add_argument("--hidden_size", type=int, default=768)
-    parser.add_argument("--bar", default=False, type=str, help="True or False")
-
+    parser.add_argument("--img_hidden_sz", type=int, default=2048, help="Whether to use amp for fp16")
     parser.add_argument("--img_postion", default=True, help="It will produce img_position.")
-    parser.add_argument("--do_train", action="store_true", default=True, help="Whether to run training. This should ALWAYS be set to True.")
-    parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
+    parser.add_argument("--drop_prob", default=0.1, type=float)
 
-    parser.add_argument("--new_segment_ids", default=False, action="store_true", help="Use new segment ids for bi-uni-directional LM.")
-    parser.add_argument("--trunc_seg", default="b", help="Truncate_config: first truncate segment A/B (option: a, b).")
+    # truncate_config for input
+    parser.add_argument("--max_len_b", type=int, default=253, help="Truncate_config: maximum length of segment B. (Language)")
+    parser.add_argument("--trunc_seg", type=str, default="b", help="Truncate_config: first truncate segment A/B (option: a, b).")
     parser.add_argument("--always_truncate_tail", action="store_true", help="Truncate_config: Whether we should always truncate tail.")
 
+    # dataset
+    parser.add_argument("--vqa_dataset", default="vqa-rad", type=str, choices=["vqa-rad", "vqa-mimic"])
+    # dataset (vqa-rad)
+    parser.add_argument("--vqa_rad", default="all", type=str, choices=["all", "chest", "head", "abd"])
+
+    # training
+    parser.add_argument("--do_train", action="store_true", default=True, help="Whether to run training. This should ALWAYS be set to True.")
+    parser.add_argument("--num_train_epochs", default=50, type=int)
+    parser.add_argument("--train_batch_size", default=16, type=int)
+
+    parser.add_argument("--sche_mode", type=str, default="warmup_linear", help="warmup_linear | warmup_constant | warmup_cosine")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of updates steps to accumulate before performing a backward/update pass.")
     parser.add_argument("--learning_rate", default=3e-5, type=float, help="The initial learning rate for Adam.")  # 3e-5
     parser.add_argument("--label_smoothing", default=0, type=float, help="The initial learning rate for Adam.")
     parser.add_argument("--weight_decay", default=0.01, type=float, help="The weight decay rate for Adam.")
-    parser.add_argument("--finetune_decay", action="store_true", help="Weight decay to the original weights.")
     parser.add_argument("--warmup_proportion", default=0.1, type=float, help="Proportion of training to perform linear learning rate warmup for. " "E.g., 0.1 = 10%% of training.")
     parser.add_argument("--no_cuda", action="store_true", help="Whether not to use CUDA when available")
-
     parser.add_argument("--fp16", action="store_true", default=False, help="Whether to use 16-bit float precision instead of 32-bit")
     parser.add_argument("--fp32_embedding", action="store_true", default=False, help="Whether to use 32-bit float precision instead of 32-bit for embeddings")
+
+    # NOTE: NOT USED ANYMORE
+    # parser.add_argument("--tasks", default="vqa", help="report_generation | vqa")
+    # parser.add_argument("--from_scratch", action="store_true", default=False, help="Initialize parameters with random values (i.e., training from scratch).")
+    # parser.add_argument("--mask_prob", default=0.0, type=float, help="Number of prediction is sometimes less than max_pred when sequence is short.")
+    # parser.add_argument("--mlm_task", type=str, default=True, help="The model will train only mlm task!! | True | False")
+    # parser.add_argument("--generation_dataset", default="mimic-cxr", type=str, help=["mimic-cxr, openi"])
+    # parser.add_argument("--data_set", default="train", type=str, help="train | valid")
+    # parser.add_argument("--finetune_decay", action="store_true", help="Weight decay to the original weights.")
+    # parser.add_argument("--do_lower_case", action="store_true", help="Set this flag if you are using an uncased model.")
+
+    # parser.add_argument("--bar", default=False, type=str, help="True or False")
+    # parser.add_argument("--random_bootstrap_testnum", type=int, default=30, help="Random bootstrap num of Iteration")
+
+    parser.add_argument("--vqa_eval", action="store_true", help="vqa_eval | True | False")
+
+    # parser.add_argument("--max_pred", type=int, default=3, help="Max tokens of prediction.")
+    # parser.add_argument(
+    #     "--s2s_prob", default=0, type=float, help="Percentage of examples that are bi-uni-directional LM (seq2seq). This must be turned off!!!!!!! because this is not for seq2seq model!!!"
+    # )
+    # parser.add_argument("--bi_prob", default=1, type=float, help="Percentage of examples that are bidirectional LM.")
+    # parser.add_argument("--new_segment_ids", default=False, action="store_true", help="Use new segment ids for bi-uni-directional LM.")
+
     parser.add_argument(
         "--loss_scale",
         type=float,
@@ -625,7 +585,6 @@ if __name__ == "__main__":
     parser.add_argument("--wandb_project_name", type=str, default="phase1-qa-dataset-debugging-seongsu")
     parser.add_argument("--exp_name", type=str, default="")
     parser.add_argument("--image_root", type=str, default="../../data/mimic/re_512_3ch/Train")
-    parser.add_argument("--model_recover_path", default=None, type=str, help="The file of fine-tuned pretraining model. ex)'./pretrained_model/pytorch_model.bin'")  # model load
     parser.add_argument("--output_dir", default="/home/edlab/ssbae/medvill/vqa_finetune", type=str, help="The output directory where the model predictions and checkpoints will be written.")
     parser.add_argument("--log_file", default="training.log", type=str, help="The output directory where the log will be written.")
 
@@ -636,13 +595,9 @@ if __name__ == "__main__":
 
     # parser.add_argument('--dist_url', default='file://[PT_OUTPUT_DIR]/nonexistent_file', type = str, help = 'url used to set up distributed training')
     parser.add_argument("--dist_url", default="env://", help="url used to set up distributed training")
-
-    parser.add_argument("--sche_mode", default="warmup_linear", type=str, help="warmup_linear | warmup_constant | warmup_cosine")
-    parser.add_argument("--drop_prob", default=0.1, type=float)
-    parser.add_argument("--use_num_imgs", default=-1, type=int)
-    parser.add_argument("--max_drop_worst_ratio", default=0, type=float)
-    parser.add_argument("--drop_after", default=6, type=int)
-    parser.add_argument("--tasks", default="vqa", help="report_generation | vqa")
+    # parser.add_argument("--use_num_imgs", default=-1, type=int)
+    # parser.add_argument("--max_drop_worst_ratio", default=0, type=float)
+    # parser.add_argument("--drop_after", default=6, type=int)
     parser.add_argument("--relax_projection", action="store_true", help="Use different projection layers for tasks.")
 
     args = parser.parse_args()

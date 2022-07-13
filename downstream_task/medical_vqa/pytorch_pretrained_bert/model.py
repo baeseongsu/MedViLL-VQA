@@ -820,9 +820,9 @@ class ImageBertEmbeddings(nn.Module):
     def __init__(self, args, embeddings):  # self.img_embeddings = ImageBertEmbeddings(args, self.txt_embeddings)
         super().__init__()
         self.args = args
-        self.img_embeddings = nn.Linear(args.img_hidden_sz, args.hidden_size)
+        self.img_embeddings = nn.Linear(args.img_hidden_sz, args.hidden_size)  # img_hidden_sz=2048, hidden_size=768
 
-        if self.args.img_postion:
+        if self.args.img_postion:  # True
             self.position_embeddings = embeddings.position_embeddings
         self.token_type_embeddings = embeddings.token_type_embeddings
         self.word_embeddings = embeddings.word_embeddings
@@ -839,7 +839,7 @@ class ImageBertEmbeddings(nn.Module):
 
         token_embeddings = torch.cat([cls_input_id, imgs_embeddings, sep_input_id], dim=1)
 
-        if self.args.img_postion:
+        if self.args.img_postion:  # True
             position_ids = torch.tensor([0, seq_len - 1], dtype=torch.long).cuda()
             position_ids = position_ids.unsqueeze(0).expand(bsz, 2)
             position_embeddings = self.position_embeddings(position_ids)
@@ -848,6 +848,7 @@ class ImageBertEmbeddings(nn.Module):
             embeddings = token_embeddings + token_position_embeddings + token_type_embeddings  # should be tensor
         else:
             embeddings = token_embeddings + token_type_embeddings  # should be tensor
+
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
@@ -1017,23 +1018,149 @@ class BertForPreTrainingLossMask(PreTrainedBertModel):
             return masked_lm_loss, dummy_value, dummy_value, dummy_value, dummy_value
 
 
-class CXRBertDecoder(nn.Module):  # MultimodalBertEncoder, BERT
-    def __init__(self, config, args):
-        super(CXRBertDecoder, self).__init__()
-        self.args = args
-        self.new_segment_ids = args.new_segment_ids
-        type_vocab_size = 6 if args.new_segment_ids else 2
+# class CXRBertDecoder(nn.Module):  # MultimodalBertEncoder, BERT
+#     def __init__(self, config, args):
+#         super(CXRBertDecoder, self).__init__()
+#         self.args = args
+#         self.new_segment_ids = args.new_segment_ids
+#         type_vocab_size = 6 if args.new_segment_ids else 2
 
-        bert = BertModelIncr(config, args)
+#         bert = BertModelIncr(config, args)
+#         self.txt_embeddings = bert.embeddings
+#         self.img_embeddings = ImageBertEmbeddings(args, self.txt_embeddings)
+
+#         if args.img_encoding == "random_sample":
+#             self.img_encoder = pixel_random_sample(args)
+#         elif args.img_encoding == "fully_use_cnn":
+#             self.img_encoder = pixel_full_sampling()
+#         for p in self.img_encoder.parameters():
+#             p.requires_grad = False
+#         for c in list(self.img_encoder.children())[5:]:
+#             for p in c.parameters():
+#                 p.requires_grad = True
+
+#         self.encoder = bert.encoder
+#         self.pooler = bert.pooler
+
+#     def get_extended_attention_mask(self, input_ids, token_type_ids, attention_mask):
+#         if attention_mask is None:
+#             attention_mask = torch.ones_like(input_ids)
+#         if token_type_ids is None:
+#             token_type_ids = torch.zeros_like(input_ids)
+
+#         if attention_mask.dim() == 2:
+#             extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+#         elif attention_mask.dim() == 3:
+#             extended_attention_mask = attention_mask.unsqueeze(1)
+#         else:
+#             raise NotImplementedError
+#         try:
+#             extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
+#         except StopIteration:
+#             extended_attention_mask = extended_attention_mask.to(dtype=torch.float16)
+
+#         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+#         return extended_attention_mask
+
+#     def forward(self, input_img, input_ids, token_type_ids, position_ids, attention_mask, prev_embedding=None, prev_encoded_layers=None, output_all_encoded_layers=True, len_vis_input=200):
+#         img, img_pos = self.img_encoder(input_img)  # BxNx2048
+#         # extended_attn_mask = self.get_extended_attention_mask(attn_mask)
+#         extended_attention_mask = self.get_extended_attention_mask(input_ids, token_type_ids, attention_mask)
+
+#         if input_ids.size(1) > len_vis_input:
+#             img_embed_out = self.img_embeddings(input_ids[:, : len_vis_input + 2], img, img_pos, token_type_ids[:, : len_vis_input + 2])  # img_embed_out: torch.Size([32, 5, 768])
+#             txt_embed_out = self.txt_embeddings(input_ids[:, len_vis_input + 2 :], token_type_ids[:, len_vis_input + 2 :])  # txt_embed_out: torch.Size([32, 507, 768])
+#             embedding_output = torch.cat([img_embed_out, txt_embed_out], 1)  # TODO: Check B x (TXT + IMG) x HID
+
+#         else:
+#             txt_embed_out = self.txt_embeddings(input_ids, token_type_ids)  # txt_embed_out: torch.Size([32, 507, 768])
+#             embedding_output = torch.cat([txt_embed_out], 1)  # TODO: Check B x (TXT + IMG) x HID
+#         encoded_layers = self.encoder(
+#             embedding_output, extended_attention_mask, prev_embedding=prev_embedding, prev_encoded_layers=prev_encoded_layers, output_all_encoded_layers=output_all_encoded_layers
+#         )
+#         sequence_output = encoded_layers[-1]
+#         pooled_output = self.pooler(sequence_output)
+#         if not output_all_encoded_layers:
+#             encoded_layers = encoded_layers[-1]
+#         return embedding_output, encoded_layers, pooled_output
+
+
+class PixelRandomSamplingModule(nn.Module):
+    """
+    Modified Version (2022.07.13, Seongsu Bae)
+    """
+    def __init__(self, len_vis_input=180):
+        super(PixelRandomSamplingModule, self).__init__()
+        self.len_vis_input = len_vis_input
+        # load resnet model (strips off second to last layer)
+        model = torchvision.models.resnet50(pretrained=True)
+        modules = list(model.children())[:-2]
+        self.model = nn.Sequential(*modules)
+
+    def forward(self, x):
+        out = self.model(x)  # (bsz, 3, 512, 512) => (bsz, 2048, 16, 16)
+        out = torch.flatten(out, start_dim=2).transpose(1, 2).contiguous()  # (bsz, 2048, 16, 16) => (bsz, 256, 2048)
+
+        vis_pe = torch.arange(out.size(1), dtype=torch.long).cuda()  # (256)
+        vis_pe = vis_pe.unsqueeze(0).expand(out.size(0), out.size(1))  # (256) => (bsz, 256)
+
+        random_sampling = torch.randperm(out.size(1))[: self.len_vis_input]  # args.num_image_embeds
+        random_sampling, _ = torch.sort(random_sampling)
+
+        out = out[:, random_sampling]  # (bsz, 180, 2048)
+        vis_pe = vis_pe[:, random_sampling]  # (bsz, 180)
+        return out, vis_pe
+
+
+class PixelFullUseModule(nn.Module):
+    """
+    Modified Version (2022.07.13, Seongsu Bae)
+    """
+    def __init__(self, len_vis_input=256):
+        super(PixelFullUseModule, self).__init__()
+        self.len_vis_input = len_vis_input
+        # load resnet model (strips off second to last layer)
+        model = torchvision.models.resnet50(pretrained=True)
+        modules = list(model.children())[:-2]
+        self.model = nn.Sequential(*modules)
+
+    def forward(self, x):
+        out = self.model(x)  # (bsz, 3, 512, 512) => (bsz, 2048, 16, 16)
+        out = torch.flatten(out, start_dim=2).transpose(1, 2).contiguous()  # (bsz, 2048, 16, 16) => (bsz, 256, 2048)
+
+        vis_pe = torch.arange(out.size(1), dtype=torch.long).cuda()  # (256)
+        vis_pe = vis_pe.unsqueeze(0).expand(out.size(0), out.size(1))  # (256) => (bsz, 256)
+        return out, vis_pe
+
+
+class MedViLLForVQA(PreTrainedBertModel):
+    """
+    Modified Version (2022.07.13, Seongsu Bae)
+    """
+    def __init__(self, config, args, num_labels=458):
+        super(MedViLLForVQA, self).__init__(config)
+        
+        # init arguments
+        self.config = config
+        self.args = args
+        self.num_labels = num_labels
+        self.len_vis_input = args.len_vis_input
+
+        # Image/Text embeddings
+        bert = BertModel(config)
         self.txt_embeddings = bert.embeddings
         self.img_embeddings = ImageBertEmbeddings(args, self.txt_embeddings)
 
+        # Image Encoder
         if args.img_encoding == "random_sample":
-            self.img_encoder = pixel_random_sample(args)
+            self.img_encoder = PixelRandomSamplingModule(len_vis_input=180)  # 180
         elif args.img_encoding == "fully_use_cnn":
-            self.img_encoder = pixel_full_sampling()
+            self.img_encoder = PixelFullUseModule(len_vis_input=256)
+
         for p in self.img_encoder.parameters():
             p.requires_grad = False
+
+        # We train some part of the layer on the cnn model.
         for c in list(self.img_encoder.children())[5:]:
             for p in c.parameters():
                 p.requires_grad = True
@@ -1041,18 +1168,27 @@ class CXRBertDecoder(nn.Module):  # MultimodalBertEncoder, BERT
         self.encoder = bert.encoder
         self.pooler = bert.pooler
 
+        # NOTE: for scratch
+        self.apply(self.init_bert_weights)
+
+        self.ans_classifier = nn.Sequential(
+            nn.Linear(config.hidden_size, config.hidden_size * 2),
+            nn.ReLU(),
+            nn.Linear(config.hidden_size * 2, num_labels),
+        )
+
     def get_extended_attention_mask(self, input_ids, token_type_ids, attention_mask):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
-
         if attention_mask.dim() == 2:
             extended_attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
         elif attention_mask.dim() == 3:
             extended_attention_mask = attention_mask.unsqueeze(1)
         else:
             raise NotImplementedError
+
         try:
             extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
         except StopIteration:
@@ -1061,69 +1197,126 @@ class CXRBertDecoder(nn.Module):  # MultimodalBertEncoder, BERT
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
         return extended_attention_mask
 
-    def forward(self, input_img, input_ids, token_type_ids, position_ids, attention_mask, prev_embedding=None, prev_encoded_layers=None, output_all_encoded_layers=True, len_vis_input=200):
-        img, img_pos = self.img_encoder(input_img)  # BxNx2048
-        # extended_attn_mask = self.get_extended_attention_mask(attn_mask)
+    def forward(
+        self,
+        img,
+        _,
+        input_ids,
+        token_type_ids=None,
+        attention_mask=None,
+        # masked_lm_labels=None,
+        ans_labels=None,
+        # masked_pos=None,
+        # masked_weights=None,
+        # task_idx=None,
+        # drop_worst_ratio=0.2,
+        vqa_inference=False,
+        ans_type=None,
+    ):
+        # visual embedding
+        vis_feats, vis_pe = self.img_encoder(img)  # image region features
+        img_embed_out = self.img_embeddings(input_ids[:, : self.len_vis_input + 2], vis_feats, vis_pe, token_type_ids[:, : self.len_vis_input + 2])  # img_embed_out: torch.Size([32, 5, 768])
+
+        # text embedding
+        txt_embed_out = self.txt_embeddings(
+            input_ids[:, self.len_vis_input + 2 :], token_type_ids[:, self.len_vis_input + 2 :]
+        )  # , attention_mask[:, self.len_vis_input+2:, self.len_vis_input+2:])  # txt_embed_out: torch.Size([32, 507, 768])
+
+        # joint embedding
+        encoder_input = torch.cat([img_embed_out, txt_embed_out], 1)  # TODO: Check B x (TXT + IMG) x HID
         extended_attention_mask = self.get_extended_attention_mask(input_ids, token_type_ids, attention_mask)
-
-        if input_ids.size(1) > len_vis_input:
-            img_embed_out = self.img_embeddings(input_ids[:, : len_vis_input + 2], img, img_pos, token_type_ids[:, : len_vis_input + 2])  # img_embed_out: torch.Size([32, 5, 768])
-            txt_embed_out = self.txt_embeddings(input_ids[:, len_vis_input + 2 :], token_type_ids[:, len_vis_input + 2 :])  # txt_embed_out: torch.Size([32, 507, 768])
-            embedding_output = torch.cat([img_embed_out, txt_embed_out], 1)  # TODO: Check B x (TXT + IMG) x HID
-
-        else:
-            txt_embed_out = self.txt_embeddings(input_ids, token_type_ids)  # txt_embed_out: torch.Size([32, 507, 768])
-            embedding_output = torch.cat([txt_embed_out], 1)  # TODO: Check B x (TXT + IMG) x HID
-        encoded_layers = self.encoder(
-            embedding_output, extended_attention_mask, prev_embedding=prev_embedding, prev_encoded_layers=prev_encoded_layers, output_all_encoded_layers=output_all_encoded_layers
-        )
+        encoded_layers = self.encoder(encoder_input, extended_attention_mask)
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
-        if not output_all_encoded_layers:
-            encoded_layers = encoded_layers[-1]
-        return embedding_output, encoded_layers, pooled_output
+
+        if vqa_inference:
+            assert ans_labels == None
+            vqa_embed = sequence_output[:, 0] * sequence_output[:, self.len_vis_input + 1]
+            vqa_pred = self.ans_classifier(vqa_embed)
+            ans_idx = torch.max(vqa_pred[:, 1:], -1)[1] + 1
+            return ans_idx
+
+        def compute_score_with_logits(logits, labels):
+            logits = torch.max(logits, 1)[1].data  # argmax
+            one_hots = torch.zeros(*labels.size()).to(logits.device)
+            one_hots.scatter_(1, logits.view(-1, 1), 1)
+            scores = one_hots * labels
+            return scores  # (B, 456)
+
+        _dummy_value = pooled_output.new(1).fill_(0)
+
+        assert ans_labels != None
+        # vqa_embed = sequence_output[:, 0]
+        vqa_embed = sequence_output[:, 0] * sequence_output[:, self.len_vis_input + 1]
+        vqa_pred = self.ans_classifier(vqa_embed)
+
+        # compute loss
+        loss_fct = nn.BCEWithLogitsLoss()
+        vqa_loss = loss_fct(vqa_pred, ans_labels)  # (16, 458) | (16, 458)
+
+        # compute accuracy
+        vqa_ans_score = compute_score_with_logits(vqa_pred, ans_labels).sum(dim=1).cpu().tolist()
+
+        # compute open/closed accuracy
+        closed_ans_score, open_ans_score = [], []
+        assert len(ans_type) == len(vqa_ans_score)
+        for idx, a_type in enumerate(ans_type):
+            if a_type == 0:  # closed
+                flag = vqa_ans_score[idx]
+                closed_ans_score.append(flag)
+            elif a_type == 1:  # open
+                flag = vqa_ans_score[idx]
+                open_ans_score.append(flag)
+            else:
+                raise ValueError()
+        assert len(vqa_ans_score) == len(closed_ans_score) + len(open_ans_score)
+
+        return _dummy_value, vqa_loss, vqa_ans_score, closed_ans_score, open_ans_score
 
 
-class MedViLLForVQA(PreTrainedBertModel):
+class MedViLLDecoderForVQA(PreTrainedBertModel):
     """
-    Modified Version (2022.07.10, Seongsu Bae)
+    Modified Version (2022.07.13, Seongsu Bae)
     """
+    def __init__(self, config, args, num_labels=458):
+        super(MedViLLDecoderForVQA, self).__init__(config)
+        
+        # init arguments
+        self.config = config
+        self.args = args
+        self.num_labels = num_labels
+        self.len_vis_input = args.len_vis_input
 
-    def __init__(self, config, args, num_labels=2, len_vis_input=None, tasks="vqa"):
-        super(MedViLLForVQA, self).__init__(config)
+        # Image/Text embeddings
         bert = BertModel(config)
-
         self.txt_embeddings = bert.embeddings
         self.img_embeddings = ImageBertEmbeddings(args, self.txt_embeddings)
 
+        # Image Encoder
         if args.img_encoding == "random_sample":
-            self.img_encoder = pixel_random_sample(args)
+            self.img_encoder = PixelRandomSamplingModule(len_vis_input=180)  # 180
         elif args.img_encoding == "fully_use_cnn":
-            self.img_encoder = pixel_full_sampling()
+            self.img_encoder = PixelFullUseModule(len_vis_input=256)
+
         for p in self.img_encoder.parameters():
             p.requires_grad = False
+
+        # We train some part of the layer on the cnn model.
         for c in list(self.img_encoder.children())[5:]:
             for p in c.parameters():
                 p.requires_grad = True
 
         self.encoder = bert.encoder
         self.pooler = bert.pooler
-        self.apply(self.init_bert_weights)
-        self.crit_mask_lm = nn.CrossEntropyLoss(reduction="none")
-        self.num_labels = num_labels
-        self.len_vis_input = len_vis_input
-        if hasattr(config, "label_smoothing") and config.label_smoothing:
-            self.crit_mask_lm_smoothed = LabelSmoothingLoss(config.label_smoothing, config.vocab_size, ignore_index=0, reduction="none")
-        else:
-            self.crit_mask_lm_smoothed = None
 
-        self.tasks = tasks
+        # NOTE: for scratch
+        self.apply(self.init_bert_weights)
+
         self.ans_classifier = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size * 2),
             nn.ReLU(),
-            nn.Linear(config.hidden_size * 2, 458),
+            nn.Linear(config.hidden_size * 2, num_labels),
         )
-        # self.vqa_crit = nn.BCEWithLogitsLoss()
 
     def get_extended_attention_mask(self, input_ids, token_type_ids, attention_mask):
         if attention_mask is None:
@@ -1161,18 +1354,18 @@ class MedViLLForVQA(PreTrainedBertModel):
         vqa_inference=False,
         ans_type=None,
     ):
-
         # visual embedding
         vis_feats, vis_pe = self.img_encoder(img)  # image region features
-        extended_attention_mask = self.get_extended_attention_mask(input_ids, token_type_ids, attention_mask)
         img_embed_out = self.img_embeddings(input_ids[:, : self.len_vis_input + 2], vis_feats, vis_pe, token_type_ids[:, : self.len_vis_input + 2])  # img_embed_out: torch.Size([32, 5, 768])
 
         # text embedding
         txt_embed_out = self.txt_embeddings(
             input_ids[:, self.len_vis_input + 2 :], token_type_ids[:, self.len_vis_input + 2 :]
         )  # , attention_mask[:, self.len_vis_input+2:, self.len_vis_input+2:])  # txt_embed_out: torch.Size([32, 507, 768])
-        encoder_input = torch.cat([img_embed_out, txt_embed_out], 1)  # TODO: Check B x (TXT + IMG) x HID
 
+        # joint embedding
+        encoder_input = torch.cat([img_embed_out, txt_embed_out], 1)  # TODO: Check B x (TXT + IMG) x HID
+        extended_attention_mask = self.get_extended_attention_mask(input_ids, token_type_ids, attention_mask)
         encoded_layers = self.encoder(encoder_input, extended_attention_mask)
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
@@ -1189,14 +1382,19 @@ class MedViLLForVQA(PreTrainedBertModel):
             one_hots = torch.zeros(*labels.size()).to(logits.device)
             one_hots.scatter_(1, logits.view(-1, 1), 1)
             scores = one_hots * labels
-            return scores  # (B, 456)
+            return scores  # (bsz, 456)
 
         _dummy_value = pooled_output.new(1).fill_(0)
 
         assert ans_labels is not None
         # vqa_embed = sequence_output[:, 0]
         vqa_embed = sequence_output[:, 0] * sequence_output[:, self.len_vis_input + 1]
-        vqa_pred = self.ans_classifier(vqa_embed)  # Linear & activation & Linear 가능한 정답 개수인 458차원으로 줄여줌
+
+        breakpoint()
+
+        # TODO:
+
+        vqa_pred = self.ans_classifier(vqa_embed)
 
         # compute loss
         loss_fct = nn.BCEWithLogitsLoss()
@@ -1220,6 +1418,7 @@ class MedViLLForVQA(PreTrainedBertModel):
         assert len(vqa_ans_score) == len(closed_ans_score) + len(open_ans_score)
 
         return _dummy_value, vqa_loss, vqa_ans_score, closed_ans_score, open_ans_score
+
 
 
 # """ for VLP, based on UniLM """

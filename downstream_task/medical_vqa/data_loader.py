@@ -210,7 +210,6 @@ class Img2txtDataset(torch.utils.data.Dataset):
         max_len,
         file_valid_jpgs,
         use_num_imgs=-1,
-        short_sampling_prob=0.1,
         sent_reverse_order=False,
         bi_uni_pipeline=[],
         s2s_prob=0,
@@ -221,7 +220,6 @@ class Img2txtDataset(torch.utils.data.Dataset):
         self.data_set = data_set
         self.tokenizer = tokenizer  # tokenize function
         self.max_len = max_len  # maximum length of tokens
-        self.short_sampling_prob = short_sampling_prob
         self.bi_uni_pipeline = bi_uni_pipeline
         self.batch_size = batch_size
         self.sent_reverse_order = sent_reverse_order
@@ -230,11 +228,11 @@ class Img2txtDataset(torch.utils.data.Dataset):
         print(" seq2seq {} vs bidirectional {}".format(self.s2s_prob, self.bi_prob))
         assert self.s2s_prob + self.bi_prob == 1
 
-        def get_random_line():
-            rand_num = randint(0, len(img_dat) - 1)
-            txt = img_dat[rand_num]["text"]
-            label = img_dat[rand_num]["label"]
-            return txt, label
+        # def get_random_line():
+        #     rand_num = randint(0, len(img_dat) - 1)
+        #     txt = img_dat[rand_num]["text"]
+        #     label = img_dat[rand_num]["label"]
+        #     return txt, label
 
         # read the file into memory
         self.ex_list = []
@@ -484,81 +482,260 @@ class Preprocess4Seq2seq(Pipeline):
         return (input_ids, segment_ids, input_mask, masked_ids, masked_pos, masked_weights, self.task_idx, img, vis_pe, ans_tk, ans_type, organ)
 
 
-class Preprocess4Seq2seqDecoder(Pipeline):
-    """Pre-processing steps for pretraining transformer"""
+# class Preprocess4Seq2seqDecoder(Pipeline):
+#     """Pre-processing steps for pretraining transformer"""
 
-    def __init__(self, tokenizer, max_len, max_txt_length, new_segment_ids=False, mode="s2s", len_vis_input=None):
+#     def __init__(self, tokenizer, max_len, max_txt_length, new_segment_ids=False, mode="s2s", len_vis_input=None):
+#         super().__init__()
+#         self.tokenizer = tokenizer
+#         self.max_len = max_len
+#         self._tril_matrix = torch.tril(torch.ones((max_len, max_len), dtype=torch.long))
+#         self.new_segment_ids = new_segment_ids
+#         self.task_idx = 3  # relax projection layer for different tasks
+#         self.mode = mode
+#         if self.mode != "s2s":
+#             raise ValueError("Invalid mode for seq2seq decode: %s" % self.mode)
+#         self.max_txt_length = max_txt_length
+#         self.len_vis_input = len_vis_input
+#         self.Resize = transforms.Resize(224)
+#         self.gray_scale_3ch = transforms.Grayscale(num_output_channels=3)
+
+#         self.ToTensor = transforms.ToTensor()
+#         self.res_Normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
+#     def __call__(self, instance):
+#         img_path, max_a_len, original_text = instance[:3]
+#         tokens_a = ["[UNK]"] * self.len_vis_input
+
+#         # Add Special Tokens
+#         padded_tokens_a = ["[CLS]"] + tokens_a + ["[SEP]"]
+
+#         assert len(padded_tokens_a) <= max_a_len + 2
+#         if max_a_len + 2 > len(padded_tokens_a):
+#             padded_tokens_a += ["[PAD]"] * (max_a_len + 2 - len(padded_tokens_a))
+#         assert len(padded_tokens_a) == max_a_len + 2
+#         max_len_in_batch = min(self.max_txt_length + max_a_len + 2, self.max_len)
+
+#         tokens = padded_tokens_a
+#         if self.new_segment_ids:
+#             segment_ids = [4] * (len(padded_tokens_a)) + [5] * (max_len_in_batch - len(padded_tokens_a))
+#         else:
+#             segment_ids = [0] * (len(padded_tokens_a)) + [1] * (max_len_in_batch - len(padded_tokens_a))
+
+#         position_ids = []
+#         for i in range(len(tokens_a) + 2):
+#             position_ids.append(i)
+#         for i in range(len(tokens_a) + 2, max_a_len + 2):
+#             position_ids.append(0)
+#         for i in range(max_a_len + 2, max_len_in_batch):
+#             position_ids.append(i - (max_a_len + 2) + len(tokens_a) + 2)
+#         # Token Indexing
+#         input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+#         gt_token = self.tokenizer.tokenize(original_text)
+#         gt_token_id = self.tokenizer.convert_tokens_to_ids(gt_token)
+
+#         while True:
+#             if len(gt_token_id) <= self.max_txt_length:
+#                 break
+#             else:
+#                 gt_token_id.pop()
+
+#         n_pad = self.max_txt_length - len(gt_token_id)
+#         gt_token_id.extend([0] * n_pad)
+#         assert len(gt_token_id) == 128
+
+#         input_mask = torch.zeros(max_len_in_batch, max_len_in_batch, dtype=torch.long)
+
+#         input_mask[:, : len(tokens_a) + 2].fill_(1)
+#         second_st, second_end = len(padded_tokens_a), max_len_in_batch
+
+#         input_mask[second_st:second_end, second_st:second_end].copy_(self._tril_matrix[: second_end - second_st, : second_end - second_st])
+
+#         img = Image.open(img_path)
+#         img = self.gray_scale_3ch(img)
+#         img = self.ToTensor(img)
+#         img = self.res_Normalize(img)
+
+#         vis_pe = torch.arange(2048, dtype=torch.float)
+#         vis_pe = vis_pe.unsqueeze(0).expand(len(tokens_a), 2048)
+
+#         return (input_ids, segment_ids, position_ids, input_mask, self.task_idx, img, vis_pe, gt_token_id)
+
+
+class VQARADDataset(torch.utils.data.Dataset):
+    """
+    Modified Version (2022.07.14, Seongsu Bae)
+    """
+
+    def __init__(
+        self,
+        args,
+        split,
+        file_src,
+        img_root,
+        batch_size,
+        tokenizer,
+        preproc_pipeline=None,
+    ):
         super().__init__()
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self._tril_matrix = torch.tril(torch.ones((max_len, max_len), dtype=torch.long))
-        self.new_segment_ids = new_segment_ids
-        self.task_idx = 3  # relax projection layer for different tasks
-        self.mode = mode
-        if self.mode != "s2s":
-            raise ValueError("Invalid mode for seq2seq decode: %s" % self.mode)
-        self.max_txt_length = max_txt_length
-        self.len_vis_input = len_vis_input
-        self.Resize = transforms.Resize(224)
-        self.gray_scale_3ch = transforms.Grayscale(num_output_channels=3)
+        self.args = args
+        self.split = split
+        self.file_src = file_src
+        self.img_root = img_root
+        self.batch_size = batch_size
 
-        self.ToTensor = transforms.ToTensor()
-        self.res_Normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        self.tokenizer = tokenizer  # tokenize function
+        self.preproc_pipeline = preproc_pipeline
+
+        # read answer idx info
+        ans2label_path = os.path.join(file_src, "cache", "trainval_ans2label.pkl")
+        label2ans_path = os.path.join(file_src, "cache", "trainval_label2ans.pkl")
+        self.ans2label = cPickle.load(open(ans2label_path, "rb"))
+        self.label2ans = cPickle.load(open(label2ans_path, "rb"))
+        assert len(self.ans2label) == len(self.label2ans)
+        self.num_ans_candidates = len(self.ans2label)
+
+        # read image idx info
+        self.img_id2idx = json.load(open(os.path.join(file_src, "imgid2idx.json")))
+
+        # build entries
+        entries = _load_dataset(args, file_src, self.split, self.img_id2idx, self.label2ans)
+
+        # save example list
+        self.ex_list = []
+
+        for entry in entries:
+            tokens = pre_processing(self.tokenizer, entry["question"])
+            entry["q_token"] = tokens
+            answer = entry["answer"]
+
+            if answer != None:
+                labels = np.array(answer["labels"])
+                scores = np.array(answer["scores"], dtype=np.float32)
+                if len(labels):
+                    labels = torch.from_numpy(labels)
+                    scores = torch.from_numpy(scores)
+                    entry["answer"]["labels"] = labels
+                    entry["answer"]["scores"] = scores
+                else:
+                    entry["answer"]["labels"] = None
+                    entry["answer"]["scores"] = None
+
+            src_tk = os.path.join(self.img_root, entry["image_name"])
+            labels = answer["labels"]
+            scores = answer["scores"]
+
+            target = torch.zeros(self.num_ans_candidates)
+            if labels is not None:
+                target.scatter_(0, labels, scores)
+
+            self.ex_list.append((src_tk, entry["q_token"], target, entry["answer_type"], entry["image_organ"]))
+
+        print("Load {0} documents".format(len(self.ex_list)))
+
+        del entries
+
+    def __len__(self):
+        return len(self.ex_list)
+
+    def __getitem__(self, idx):
+        instance = self.ex_list[idx]
+        instance = self.preproc_pipeline(instance)
+        return instance
+
+    def __iter__(self):  # iterator to load data
+        for __ in range(math.ceil(len(self.ex_list) / float(self.batch_size))):
+            batch = []
+            for __ in range(self.batch_size):
+                idx = randint(0, len(self.ex_list) - 1)
+                batch.append(self.__getitem__(idx))
+            # To Tensor
+            yield batch_list_to_batch_tensors(batch)
+
+
+class PipelineForVQARAD(Pipeline):
+    """
+    Modified Version (2022.07.14, Seongsu Bae)
+    """
+
+    def __init__(
+        self,
+        args,
+        tokenizer,
+        max_seq_len=512,
+        len_vis_input=256,
+    ):
+        super().__init__()
+        self.args = args
+        self.tokenizer = tokenizer  # tokenizer # function from token to token index
+        self.max_seq_len = max_seq_len
+        self.len_vis_input = len_vis_input
+
+        # for images
+        self._transform = transforms.Compose(
+            [
+                transforms.Grayscale(num_output_channels=3),
+                transforms.Resize([512, 512]),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
 
     def __call__(self, instance):
-        img_path, max_a_len, original_text = instance[:3]
+        img_path, tokens_b, ans_tk, ans_type, organ = instance
+
+        # 1) input ids
         tokens_a = ["[UNK]"] * self.len_vis_input
-
-        # Add Special Tokens
-        padded_tokens_a = ["[CLS]"] + tokens_a + ["[SEP]"]
-
-        assert len(padded_tokens_a) <= max_a_len + 2
-        if max_a_len + 2 > len(padded_tokens_a):
-            padded_tokens_a += ["[PAD]"] * (max_a_len + 2 - len(padded_tokens_a))
-        assert len(padded_tokens_a) == max_a_len + 2
-        max_len_in_batch = min(self.max_txt_length + max_a_len + 2, self.max_len)
-
-        tokens = padded_tokens_a
-        if self.new_segment_ids:
-            segment_ids = [4] * (len(padded_tokens_a)) + [5] * (max_len_in_batch - len(padded_tokens_a))
-        else:
-            segment_ids = [0] * (len(padded_tokens_a)) + [1] * (max_len_in_batch - len(padded_tokens_a))
-
-        position_ids = []
-        for i in range(len(tokens_a) + 2):
-            position_ids.append(i)
-        for i in range(len(tokens_a) + 2, max_a_len + 2):
-            position_ids.append(0)
-        for i in range(max_a_len + 2, max_len_in_batch):
-            position_ids.append(i - (max_a_len + 2) + len(tokens_a) + 2)
-        # Token Indexing
+        tokens = ["[CLS]"] + tokens_a + ["[SEP]"] + tokens_b + ["[SEP]"]
         input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-        gt_token = self.tokenizer.tokenize(original_text)
-        gt_token_id = self.tokenizer.convert_tokens_to_ids(gt_token)
 
-        while True:
-            if len(gt_token_id) <= self.max_txt_length:
-                break
-            else:
-                gt_token_id.pop()
+        # 2) segment ids
+        segment_ids = [0] * (len(tokens_a) + 2) + [1] * (len(tokens_b) + 1)
 
-        n_pad = self.max_txt_length - len(gt_token_id)
-        gt_token_id.extend([0] * n_pad)
-        assert len(gt_token_id) == 128
+        # zero padding
+        n_pad = self.max_seq_len - len(input_ids)
+        input_ids.extend([0] * n_pad)
+        segment_ids.extend([0] * n_pad)
 
-        input_mask = torch.zeros(max_len_in_batch, max_len_in_batch, dtype=torch.long)
+        # 3) attention mask
+        attention_mask = torch.tensor([1] * len(tokens) + [0] * n_pad, dtype=torch.long)
+        attention_mask = attention_mask.unsqueeze(0).expand(self.max_seq_len, self.max_seq_len).clone()
 
-        input_mask[:, : len(tokens_a) + 2].fill_(1)
-        second_st, second_end = len(padded_tokens_a), max_len_in_batch
+        # change_path = img_path.split("/")
+        # fixed_path = change_path[:-1]
+        # fixed_path = "/".join(fixed_path)
+        # static_path = change_path[-1:]
+        # static_path = "/".join(static_path)
+        # NOTE: check which path is correct
+        # if fixed_path == "/home/mimic-cxr/dataset/vqa_image/vqa_512_3ch":
+        #     fixed_path = "/home/data_storage/mimic-cxr/dataset/data_RAD/images/"
+        #     img_path = fixed_path + static_path
 
-        input_mask[second_st:second_end, second_st:second_end].copy_(self._tril_matrix[: second_end - second_st, : second_end - second_st])
-
+        # load images
         img = Image.open(img_path)
-        img = self.gray_scale_3ch(img)
-        img = self.ToTensor(img)
-        img = self.res_Normalize(img)
+        # transform images
+        img = self._transform(img)
 
+        # positional embedding for visual part
         vis_pe = torch.arange(2048, dtype=torch.float)
         vis_pe = vis_pe.unsqueeze(0).expand(len(tokens_a), 2048)
 
-        return (input_ids, segment_ids, position_ids, input_mask, self.task_idx, img, vis_pe, gt_token_id)
+        # answer type
+        if ans_type in ["CLOSED", "CLOSED "]:
+            ans_type = torch.tensor(0)
+        elif ans_type in ["OPEN", "OPEN "]:
+            ans_type = torch.tensor(1)
+        else:
+            raise ValueError()
+
+        # organ type
+        if organ == "CHEST":
+            organ = torch.tensor(0)
+        elif organ == "HEAD":
+            organ = torch.tensor(1)
+        elif organ == "ABD":
+            organ = torch.tensor(2)
+        else:
+            raise ValueError()
+
+        return (input_ids, segment_ids, attention_mask, img, vis_pe, ans_tk, ans_type, organ)
