@@ -20,6 +20,7 @@ import h5py
 from tqdm import tqdm
 import glob
 import _pickle as cPickle
+import pandas as pd
 
 
 def truncate_tokens_pair(tokens_a, tokens_b, max_len, max_len_a=0, max_len_b=0, trunc_seg=None, always_truncate_tail=False):
@@ -737,5 +738,157 @@ class PipelineForVQARAD(Pipeline):
             organ = torch.tensor(2)
         else:
             raise ValueError()
+
+        return (input_ids, segment_ids, attention_mask, img, vis_pe, ans_tk, ans_type, organ)
+
+
+class VQAMIMICDataset(torch.utils.data.Dataset):
+    """
+    Modified Version (2022.07.16, Seongsu Bae)
+    """
+
+    def __init__(
+        self,
+        args,
+        split,
+        file_src,
+        img_root,
+        batch_size,
+        tokenizer,
+        preproc_pipeline=None,
+    ):
+        super().__init__()
+        self.args = args
+        self.split = split
+        self.file_src = file_src
+        self.img_root = img_root
+        self.batch_size = batch_size
+
+        self.tokenizer = tokenizer  # tokenize function
+        self.preproc_pipeline = preproc_pipeline
+
+        import warnings
+
+        warnings.filterwarnings("ignore")
+
+        # load dataset
+        semantic_type = args.vqa_mimic
+        entries = pd.read_csv(os.path.join(file_src, f"{split}_qa_dataset_{semantic_type}.csv"))
+        entries["answer"] = entries["answer"].astype(str)
+        entries["answer"] = entries["answer"].str.lower()
+        entries["answer"] = entries["answer"].apply(lambda x: x.split("|"))
+
+        # label indexer
+        from sklearn.preprocessing import MultiLabelBinarizer
+
+        mlb = MultiLabelBinarizer()
+
+        # NOTE: fix fpath
+        ans2idx_fpath = "/home/data_storage/EHR_VQG/SAMPLED_QA/20220717_all/csv/ans2idx.pkl"
+        self.ans2idx = pickle.load(open(ans2idx_fpath, "rb"))
+        mlb.fit([sorted([k for k in self.ans2idx.keys()])])
+        print(mlb.classes_)
+
+        self.ex_list = []
+        entries = entries.to_dict("records")
+
+        for entry in tqdm(entries):
+            tokens = pre_processing(self.tokenizer, entry["question"])
+            answer = str(entry["answer"])  # True, False
+            assert answer != None
+
+            img_path = os.path.join(img_root, entry["jpg_fpath"])
+            target = mlb.transform([entry["answer"]])
+
+            target = torch.FloatTensor(target).squeeze(0)
+
+            self.ex_list.append((img_path, tokens, target, "CLOSED", None))
+
+        print("Load {0} documents".format(len(self.ex_list)))
+
+        del entries
+
+    def __len__(self):
+        return len(self.ex_list)
+
+    def __getitem__(self, idx):
+        instance = self.ex_list[idx]
+        instance = self.preproc_pipeline(instance)
+        return instance
+
+    def __iter__(self):  # iterator to load data
+        for __ in range(math.ceil(len(self.ex_list) / float(self.batch_size))):
+            batch = []
+            for __ in range(self.batch_size):
+                idx = randint(0, len(self.ex_list) - 1)
+                batch.append(self.__getitem__(idx))
+            # To Tensor
+            yield batch_list_to_batch_tensors(batch)
+
+
+class PipelineForVQAMIMIC(Pipeline):
+    """
+    Modified Version (2022.07.16, Seongsu Bae)
+    """
+
+    def __init__(
+        self,
+        args,
+        tokenizer,
+        max_seq_len=512,
+        len_vis_input=256,
+    ):
+        super().__init__()
+        self.args = args
+        self.tokenizer = tokenizer  # tokenizer # function from token to token index
+        self.max_seq_len = max_seq_len
+        self.len_vis_input = len_vis_input
+
+        # for images
+        self._transform = transforms.Compose(
+            [
+                transforms.Grayscale(num_output_channels=3),
+                transforms.Resize([512, 512]),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
+
+    def __call__(self, instance):
+        img_path, tokens_b, ans_tk, ans_type, organ = instance
+
+        # 1) input ids
+        tokens_a = ["[UNK]"] * self.len_vis_input
+        tokens = ["[CLS]"] + tokens_a + ["[SEP]"] + tokens_b + ["[SEP]"]
+        input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+
+        # 2) segment ids
+        segment_ids = [0] * (len(tokens_a) + 2) + [1] * (len(tokens_b) + 1)
+
+        # zero padding
+        n_pad = self.max_seq_len - len(input_ids)
+        input_ids.extend([0] * n_pad)
+        segment_ids.extend([0] * n_pad)
+
+        # 3) attention mask
+        attention_mask = torch.tensor([1] * len(tokens) + [0] * n_pad, dtype=torch.long)
+        attention_mask = attention_mask.unsqueeze(0).expand(self.max_seq_len, self.max_seq_len).clone()
+
+        # load images
+        img = Image.open(img_path)
+        # transform images
+        img = self._transform(img)
+
+        # positional embedding for visual part
+        vis_pe = torch.arange(2048, dtype=torch.float)
+        vis_pe = vis_pe.unsqueeze(0).expand(len(tokens_a), 2048)
+
+        # answer type
+        ans_type = torch.tensor(0)
+        # elif ans_type in ["OPEN", "OPEN "]:
+        #     ans_type = torch.tensor(1)
+
+        # organ type
+        organ = torch.tensor(0)
 
         return (input_ids, segment_ids, attention_mask, img, vis_pe, ans_tk, ans_type, organ)

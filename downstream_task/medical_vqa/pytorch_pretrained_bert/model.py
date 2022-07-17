@@ -32,6 +32,8 @@ import torchvision
 from einops import rearrange
 from glob import glob
 
+from sklearn.metrics import accuracy_score
+
 
 class pixel_full_sampling(nn.Module):
     def __init__(self):
@@ -1089,6 +1091,7 @@ class PixelRandomSamplingModule(nn.Module):
     """
     Modified Version (2022.07.13, Seongsu Bae)
     """
+
     def __init__(self, len_vis_input=180):
         super(PixelRandomSamplingModule, self).__init__()
         self.len_vis_input = len_vis_input
@@ -1116,6 +1119,7 @@ class PixelFullUseModule(nn.Module):
     """
     Modified Version (2022.07.13, Seongsu Bae)
     """
+
     def __init__(self, len_vis_input=256):
         super(PixelFullUseModule, self).__init__()
         self.len_vis_input = len_vis_input
@@ -1137,9 +1141,10 @@ class MedViLLForVQA(PreTrainedBertModel):
     """
     Modified Version (2022.07.13, Seongsu Bae)
     """
+
     def __init__(self, config, args, num_labels=458):
         super(MedViLLForVQA, self).__init__(config)
-        
+
         # init arguments
         self.config = config
         self.args = args
@@ -1241,7 +1246,7 @@ class MedViLLForVQA(PreTrainedBertModel):
             one_hots = torch.zeros(*labels.size()).to(logits.device)
             one_hots.scatter_(1, logits.view(-1, 1), 1)
             scores = one_hots * labels
-            return scores  # (B, 456)
+            return scores, logits  # (B, 456)
 
         _dummy_value = pooled_output.new(1).fill_(0)
 
@@ -1253,34 +1258,52 @@ class MedViLLForVQA(PreTrainedBertModel):
         # compute loss
         loss_fct = nn.BCEWithLogitsLoss()
         vqa_loss = loss_fct(vqa_pred, ans_labels)  # (16, 458) | (16, 458)
+        
+        if self.args.vqa_dataset == "vqa-rad":
+            # compute score (torch.max)
+            vqa_ans_score, vqa_pred_logits = compute_score_with_logits(vqa_pred, ans_labels).sum(dim=1).cpu().tolist()
+            
+            # compute open/closed accuracy
+            closed_ans_score, open_ans_score = [], []
+            assert len(ans_type) == len(vqa_ans_score)
+            for idx, a_type in enumerate(ans_type):
+                if a_type == 0:  # closed
+                    flag = vqa_ans_score[idx]
+                    closed_ans_score.append(flag)
+                elif a_type == 1:  # open
+                    flag = vqa_ans_score[idx]
+                    open_ans_score.append(flag)
+                else:
+                    raise ValueError()
+            assert len(vqa_ans_score) == len(closed_ans_score) + len(open_ans_score)
+            return vqa_loss, vqa_ans_score, vqa_pred_logits, closed_ans_score, open_ans_score
 
-        # compute accuracy
-        vqa_ans_score = compute_score_with_logits(vqa_pred, ans_labels).sum(dim=1).cpu().tolist()
+        elif self.args.vqa_dataset == "vqa-mimic":
+            def compute_score_with_logits_multilabel(logits, labels):
+                logits = torch.sigmoid(logits)
+                one_hots = torch.zeros(*labels.size()).to(logits.device)
+                one_hots[logits > 0.5] = 1
+                # scores = accuracy_score(y_true=labels.cpu(), y_pred=one_hots.cpu(), normalize=False)
+                scores = torch.all(labels.cpu()==one_hots.cpu(), axis=1).tolist()
+                return scores, logits
 
-        # compute open/closed accuracy
-        closed_ans_score, open_ans_score = [], []
-        assert len(ans_type) == len(vqa_ans_score)
-        for idx, a_type in enumerate(ans_type):
-            if a_type == 0:  # closed
-                flag = vqa_ans_score[idx]
-                closed_ans_score.append(flag)
-            elif a_type == 1:  # open
-                flag = vqa_ans_score[idx]
-                open_ans_score.append(flag)
-            else:
-                raise ValueError()
-        assert len(vqa_ans_score) == len(closed_ans_score) + len(open_ans_score)
+            closed_ans_score, open_ans_score = [], []
+            # compute score
+            vqa_ans_score, vqa_pred_logits = compute_score_with_logits_multilabel(vqa_pred, ans_labels)
 
-        return _dummy_value, vqa_loss, vqa_ans_score, closed_ans_score, open_ans_score
+            return vqa_loss, vqa_ans_score, vqa_pred_logits, closed_ans_score, open_ans_score
+
+
 
 
 class MedViLLDecoderForVQA(PreTrainedBertModel):
     """
     Modified Version (2022.07.13, Seongsu Bae)
     """
+
     def __init__(self, config, args, num_labels=458):
         super(MedViLLDecoderForVQA, self).__init__(config)
-        
+
         # init arguments
         self.config = config
         self.args = args
@@ -1418,7 +1441,6 @@ class MedViLLDecoderForVQA(PreTrainedBertModel):
         assert len(vqa_ans_score) == len(closed_ans_score) + len(open_ans_score)
 
         return _dummy_value, vqa_loss, vqa_ans_score, closed_ans_score, open_ans_score
-
 
 
 # """ for VLP, based on UniLM """

@@ -105,13 +105,15 @@ def main(args):
     args.world_size = int(os.environ["WORLD_SIZE"])
     # os.environ['MASTER_ADDR'] = '127.0.0.1'
     # os.environ['MASTER_PORT'] = '3412'
+    print("global_rank: {}, local rank: {}".format(args.global_rank, args.local_rank))
 
-    # NOTE: load pre-trained model
+    # Load pre-trained model (from origianl github)
     if args.model_recover_path != None:
         args.config_path = os.path.join(os.path.dirname(args.model_recover_path), "config.json")
     else:
-        args.model_recover_path = "/home/edlab/jhmoon/mimic_mv_real/mimic-cxr/pre-train/_2/base_PAR_36,128/pytorch_model.bin"
-        args.config_path = os.path.join(os.path.dirname(args.model_recover_path), "config.json")
+        raise ValueError()
+        # args.model_recover_path = "/home/edlab/jhmoon/mimic_mv_real/mimic-cxr/pre-train/_2/base_PAR_36,128/pytorch_model.bin"
+        # args.config_path = os.path.join(os.path.dirname(args.model_recover_path), "config.json")
 
     # set experiment name
     if args.model_recover_path != None:
@@ -123,23 +125,34 @@ def main(args):
     # set output directory
     args.output_dir = os.path.join(args.output_dir, f"""{args.model_recover_path.split("/")[-3]}_{args.exp_name}""")
     print("args.output_dir", args.output_dir)
-    print("global_rank: {}, local rank: {}".format(args.global_rank, args.local_rank))
 
+    # set max sequence length
     args.max_seq_length = args.max_len_b + args.len_vis_input + 3  # +3 for 2x[SEP] and [CLS]
 
     # define file path
     if args.vqa_dataset == "vqa-rad":
-        # args.src_file = '../../data/vqa_rad/data_RAD'
         args.src_file = "/home/data_storage/mimic-cxr/dataset/data_RAD"
         args.img_path = "/home/data_storage/mimic-cxr/dataset/vqa_image/vqa_512_3ch"
-        args.train_dataset = "/home/data_storage/mimic-cxr/dataset/data_RAD/trainet.json"
-        # args.file_valid_jpgs = "../../data/vqa_rad/vqa_rad_original_set.json"
-    elif args.vqa_dataset == "vqa-mimic":
-        # TODO:
+        # args.train_dataset = "/home/data_storage/mimic-cxr/dataset/data_RAD/trainet.json"
+
+    elif args.vqa_dataset == "slake":
         args.src_file = None
         args.img_path = None
-        args.train_dataset = None
-        # args.file_valid_jpgs = None
+
+    elif args.vqa_dataset == "vqa-mimic":
+        # TODO:
+        semantic_type = args.vqa_mimic
+        assert semantic_type in ["all", "verify", "choose", "query"]
+        if args.vqa_mimic == "all":
+            args.src_file = "/home/data_storage/EHR_VQG/SAMPLED_QA/20220717_all/csv"
+        elif args.vqa_mimic in ["verify", "choose"]:
+            args.src_file = f"/home/data_storage/EHR_VQG/SAMPLED_QA/20220628_{semantic_type}/csv/"
+        elif args.vqa_mimic == "query":
+            args.src_file = f"/home/data_storage/EHR_VQG/SAMPLED_QA/20220627_{semantic_type}/full/csv/"
+        else:
+            raise ValueError()
+
+        args.img_path = "/home/data_storage/mimic-cxr-jpg/2.0.0/resized_512"
     else:
         raise ValueError()
 
@@ -184,9 +197,9 @@ def main(args):
     tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=True)
 
     # build preprocessing pipeline
-    from data_loader import PipelineForVQARAD
+    from data_loader import PipelineForVQARAD, PipelineForVQAMIMIC
 
-    preproc_pipeline = PipelineForVQARAD(
+    preproc_pipeline = PipelineForVQAMIMIC(
         args=args,
         tokenizer=tokenizer,
         max_seq_len=args.max_seq_length,
@@ -194,33 +207,35 @@ def main(args):
     )
 
     # get train dataset
-    from data_loader import VQARADDataset
+    from data_loader import VQARADDataset, VQAMIMICDataset
 
-    train_dataset = VQARADDataset(
-        args=args,
-        split="train",
-        file_src=args.src_file,  # "/home/data_storage/mimic-cxr/dataset/data_RAD"
-        img_root=args.img_path,
-        batch_size=args.train_batch_size,
-        tokenizer=tokenizer,
-        preproc_pipeline=preproc_pipeline,
-    )
+    if not args.vqa_eval:
+        train_dataset = VQAMIMICDataset(
+            args=args,
+            split="train",
+            file_src=args.src_file,  # "/home/data_storage/mimic-cxr/dataset/data_RAD"
+            img_root=args.img_path,
+            batch_size=args.train_batch_size,
+            tokenizer=tokenizer,
+            preproc_pipeline=preproc_pipeline,
+        )
 
-    # get train sampler
-    train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+        # get train sampler
+        train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
 
-    # get train dataloader
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=args.train_batch_size,
-        sampler=train_sampler,
-        collate_fn=batch_list_to_batch_tensors,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
+        # get train dataloader
+        train_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=args.train_batch_size,
+            sampler=train_sampler,
+            collate_fn=batch_list_to_batch_tensors,
+            num_workers=args.num_workers,
+            pin_memory=True,
+        )
+        t_total = int(len(train_dataloader) * args.num_train_epochs * 1.0 / args.gradient_accumulation_steps)
 
     # get eval dataset
-    eval_dataset = VQARADDataset(
+    eval_dataset = VQAMIMICDataset(
         args=args,
         split="test",
         file_src=args.src_file,  # "/home/data_storage/mimic-cxr/dataset/data_RAD"
@@ -240,11 +255,12 @@ def main(args):
         drop_last=True,
     )
 
-    t_total = int(len(train_dataloader) * args.num_train_epochs * 1.0 / args.gradient_accumulation_steps)
-
     # prepare model
     recover_step = _get_max_epoch_model(args.output_dir)
-    cls_num_labels = 2  # TODO: vqa-rad (458), vqa-mimic (??)
+    if args.vqa_dataset == "vqa-rad":
+        cls_num_labels = 458
+    elif args.vqa_dataset == "vqa-mimic":
+        cls_num_labels = 106  # TODO: vqa-rad (458), vqa-mimic (??)
     type_vocab_size = 2
     relax_projection = 4 if args.relax_projection else 0
     # task_idx_proj = 3 if args.tasks == "report_generation" else 0
@@ -268,7 +284,7 @@ def main(args):
             args.bert_model,
             state_dict=model_recover,
             args=args,
-            num_labels=458,  # cls_num_labels
+            num_labels=cls_num_labels,  # cls_num_labels
             type_vocab_size=type_vocab_size,
             relax_projection=relax_projection,
             config_path=args.config_path,
@@ -298,23 +314,24 @@ def main(args):
 
     model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
 
-    # get optimizer
-    param_optimizer = list(model.named_parameters())
-    no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
-    optimizer_grouped_parameters = [
-        {"params": [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], "weight_decay": 0.01},
-        {"params": [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
-    ]
-    optimizer = BertAdam(optimizer_grouped_parameters, lr=args.learning_rate, warmup=args.warmup_proportion, schedule=args.sche_mode, t_total=t_total)
-    if recover_step:
-        logger.info("***** Recover optimizer: %d *****", recover_step)
-        optim_recover = torch.load(os.path.join(args.output_dir, "optim.{0}.bin".format(recover_step)))
-        if hasattr(optim_recover, "state_dict"):
-            optim_recover = optim_recover.state_dict()
-        optimizer.load_state_dict(optim_recover)
-        if args.loss_scale == 0:
-            logger.info("***** Recover optimizer: dynamic_loss_scale *****")
-            optimizer.dynamic_loss_scale = True
+    if not args.vqa_eval:
+        # get optimizer
+        param_optimizer = list(model.named_parameters())
+        no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
+        optimizer_grouped_parameters = [
+            {"params": [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], "weight_decay": 0.01},
+            {"params": [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
+        ]
+        optimizer = BertAdam(optimizer_grouped_parameters, lr=args.learning_rate, warmup=args.warmup_proportion, schedule=args.sche_mode, t_total=t_total)
+        if recover_step:
+            logger.info("***** Recover optimizer: %d *****", recover_step)
+            optim_recover = torch.load(os.path.join(args.output_dir, "optim.{0}.bin".format(recover_step)))
+            if hasattr(optim_recover, "state_dict"):
+                optim_recover = optim_recover.state_dict()
+            optimizer.load_state_dict(optim_recover)
+            if args.loss_scale == 0:
+                logger.info("***** Recover optimizer: dynamic_loss_scale *****")
+                optimizer.dynamic_loss_scale = True
 
     logger.info("***** CUDA.empty_cache() *****")
     torch.cuda.empty_cache()
@@ -322,6 +339,12 @@ def main(args):
     if args.vqa_eval:
         # total_acc, closed_acc, open_acc = vqa_eval(args, device, logger, bi_uni_pipeline, tokenizer, model, results_dict)
         eval_vqa_acc, eval_closed_acc, eval_open_acc = evaluate_vqa_model(args=args, model=model, eval_dataloader=eval_dataloader)
+        eval_metrics = {
+            "eval/acc (total)": eval_vqa_acc,
+            "eval/acc (closed)": eval_closed_acc,
+            "eval/acc (open)": eval_open_acc,
+        }
+        print(eval_metrics)
     else:
         if args.do_train:
 
@@ -370,7 +393,7 @@ def main(args):
                     )
 
                     # _masked_lm_loss, vqa_loss, vqa_acc, closed_acc, open_acc = loss_tuple
-                    _, vqa_loss, vqa_score, closed_score, open_score = loss_tuple
+                    vqa_loss, vqa_score, vqa_logits, closed_score, open_score = loss_tuple
 
                     # loss
                     loss = vqa_loss.mean()
@@ -397,10 +420,29 @@ def main(args):
                         optimizer.zero_grad()
                         global_step += 1
 
+                    if global_step % 500 == 0:
+                        # evaulation (stepwise)
+                        eval_vqa_acc, eval_closed_acc, eval_open_acc = evaluate_vqa_model(args=args, model=model, eval_dataloader=eval_dataloader)
+                        eval_metrics = {
+                            "eval/acc (total)": eval_vqa_acc,
+                            "eval/acc (closed)": eval_closed_acc,
+                            "eval/acc (open)": eval_open_acc,
+                        }
+                        print(eval_metrics)
+
+                        if args.wandb and is_main_process():
+                            wandb.log(eval_metrics, step=global_step)
+
                 # accuracy (epoch)
                 train_epoch_vqa_acc = sum(total_vqa_score) / len(total_vqa_score)
-                train_epoch_closed_acc = sum(total_closed_score) / len(total_closed_score)
-                train_epoch_open_acc = sum(total_open_score) / len(total_open_score)
+                if len(total_closed_score) > 0:
+                    train_epoch_closed_acc = sum(total_closed_score) / len(total_closed_score)
+                else:
+                    train_epoch_closed_acc = 0
+                if len(total_open_score) > 0:
+                    train_epoch_open_acc = sum(total_open_score) / len(total_open_score)
+                else:
+                    train_epoch_open_acc = 0
                 train_epoch_metrics = {
                     "train/epoch acc (total)": train_epoch_vqa_acc,
                     "train/epoch acc (closed)": train_epoch_closed_acc,
@@ -454,9 +496,10 @@ def evaluate_vqa_model(args, model, eval_dataloader):
     # init metrics
     test_loss = []
     total_vqa_score, total_closed_score, total_open_score = [], [], []
+    total_vqa_logits, total_vqa_labels = [], []
 
     with torch.no_grad():
-        for step, batch in enumerate(eval_dataloader):
+        for step, batch in enumerate(tqdm(eval_dataloader)):
 
             # prepare inputs
             batch = [t.to(args.device) for t in batch]
@@ -477,7 +520,7 @@ def evaluate_vqa_model(args, model, eval_dataloader):
                 ans_labels,
                 ans_type=ans_type,
             )
-            _, vqa_loss, vqa_score, closed_score, open_score = loss_tuple
+            vqa_loss, vqa_score, vqa_logits, closed_score, open_score = loss_tuple
 
             loss = vqa_loss.mean()
             test_loss.append(loss.item())
@@ -486,10 +529,37 @@ def evaluate_vqa_model(args, model, eval_dataloader):
             total_closed_score += closed_score
             total_open_score += open_score
 
-    assert len(total_vqa_score) == len(total_closed_score) + len(total_open_score)
+            total_vqa_logits += vqa_logits.cpu()
+            total_vqa_labels += ans_labels.cpu()
+
+    # assert len(total_vqa_score) == len(total_closed_score) + len(total_open_score)
+    total_vqa_labels = torch.stack(total_vqa_labels, axis=0)
+    total_vqa_labels = total_vqa_labels.numpy()
+
+    total_vqa_logits = torch.stack(total_vqa_logits, axis=0)
+    total_vqa_logits = total_vqa_logits.numpy()
+
+    from sklearn.metrics import classification_report
+
+    reports = classification_report(total_vqa_labels, total_vqa_logits >= 0.5)
+    print(reports)
+
+    # save report
+    save_file_path = os.path.join(args.output_dir, "report.bin")
+    torch.save(reports, save_file_path)
+    # with open(save_file, "wb") as f:
+    #     pickle.dump(reports, f, protocol=pickle.HIGHEST_PROTOCOL)
+    # print(classification_report(y_true, y_pred, target_names=label_names))
+
     eval_vqa_acc = sum(total_vqa_score) / len(total_vqa_score)
-    eval_closed_acc = sum(total_closed_score) / len(total_closed_score)
-    eval_open_acc = sum(total_open_score) / len(total_open_score)
+    if len(total_closed_score) != 0:
+        eval_closed_acc = sum(total_closed_score) / len(total_closed_score)
+    else:
+        eval_closed_acc = 0
+    if len(total_open_score) != 0:
+        eval_open_acc = sum(total_open_score) / len(total_open_score)
+    else:
+        eval_open_acc = 0
 
     # empty cache
     logger.info("***** CUDA.empty_cache() *****")
@@ -531,6 +601,8 @@ if __name__ == "__main__":
 
     # dataset
     parser.add_argument("--vqa_dataset", default="vqa-rad", type=str, choices=["vqa-rad", "vqa-mimic"])
+    # dataset (vqa-mimic)
+    parser.add_argument("--vqa_mimic", default="all", type=str, choices=["all", "verify", "choose", "query"])
     # dataset (vqa-rad)
     parser.add_argument("--vqa_rad", default="all", type=str, choices=["all", "chest", "head", "abd"])
 

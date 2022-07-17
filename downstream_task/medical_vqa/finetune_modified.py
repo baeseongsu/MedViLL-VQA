@@ -396,6 +396,7 @@ def main(args):
                     # prepare inputs
                     batch = [t.to(device) for t in batch]
                     input_ids, segment_ids, input_mask, lm_label_ids, masked_pos, masked_weights, task_idx, img, vis_pe, ans_labels, ans_type, organ = batch
+                    # input_ids, segment_ids, input_mask, img, vis_pe, ans_labels, ans_type, organ = batch
 
                     # half precision
                     if args.fp16:
@@ -409,12 +410,12 @@ def main(args):
                         input_ids,
                         segment_ids,
                         input_mask,
-                        lm_label_ids,
+                        # lm_label_ids,
                         ans_labels,
-                        masked_pos=masked_pos,
-                        masked_weights=masked_weights,
-                        task_idx=task_idx,
-                        drop_worst_ratio=args.max_drop_worst_ratio if i_epoch > args.drop_after else 0,
+                        # masked_pos=masked_pos,
+                        # masked_weights=masked_weights,
+                        # task_idx=task_idx,
+                        # drop_worst_ratio=args.max_drop_worst_ratio if i_epoch > args.drop_after else 0,
                         ans_type=ans_type,
                     )
 
@@ -510,6 +511,7 @@ def evaluate_vqa_model(args, model, eval_dataloader):
             # prepare inputs
             batch = [t.to(args.device) for t in batch]
             input_ids, segment_ids, input_mask, lm_label_ids, masked_pos, masked_weights, task_idx, img, vis_pe, ans_labels, ans_type, organ = batch
+            # input_ids, segment_ids, input_mask, img, vis_pe, ans_labels, ans_type, organ = batch
 
             # half precision
             if args.fp16:
@@ -523,12 +525,12 @@ def evaluate_vqa_model(args, model, eval_dataloader):
                 input_ids,
                 segment_ids,
                 input_mask,
-                lm_label_ids,
+                # lm_label_ids,
                 ans_labels,
-                masked_pos=masked_pos,
-                masked_weights=masked_weights,
-                task_idx=task_idx,
-                drop_worst_ratio=args.max_drop_worst_ratio,
+                # masked_pos=masked_pos,
+                # masked_weights=masked_weights,
+                # task_idx=task_idx,
+                # drop_worst_ratio=args.max_drop_worst_ratio,
                 ans_type=ans_type,
             )
             _, vqa_loss, vqa_score, closed_score, open_score = loss_tuple
@@ -549,7 +551,9 @@ def evaluate_vqa_model(args, model, eval_dataloader):
     logger.info("***** CUDA.empty_cache() *****")
     torch.cuda.empty_cache()
 
-    # # save the evaulation result
+    print(eval_vqa_acc, eval_closed_acc, eval_open_acc)
+
+    # save the evaulation result
     # if args.model_recover_path is None:
     #     save_file = f"vqa_tr_random{args.random_bootstrap_testnum}_finetune_only_50ep.pickle"
     # elif args.model_recover_path.split("/")[-1].split(".")[0] == "pytorch_model":

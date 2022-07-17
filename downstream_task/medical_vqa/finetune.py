@@ -31,7 +31,8 @@ from loader_utils import batch_list_to_batch_tensors
 import data_loader
 from data_parallel import DataParallelImbalance
 import wandb
-import utils
+
+# import utils
 import pickle
 from collections import defaultdict
 import time
@@ -77,8 +78,8 @@ def main():
     parser.add_argument("--mlm_task", type=str, default=True, help="The model will train only mlm task!! | True | False")
     parser.add_argument("--vqa_eval", action="store_true", help="vqa_eval | True | False")
 
-    parser.add_argument("--train_batch_size", default=16, type=int, help="Total batch size for training.")
-    parser.add_argument("--num_train_epochs", default=100, type=int, help="Total number of training epochs to perform.")
+    parser.add_argument("--train_batch_size", default=1, type=int, help="Total batch size for training.")
+    parser.add_argument("--num_train_epochs", default=50, type=int, help="Total number of training epochs to perform.")
     parser.add_argument("--from_scratch", action="store_true", default=False, help="Initialize parameters with random values (i.e., training from scratch).")
     parser.add_argument("--img_encoding", type=str, default="fully_use_cnn", choices=["random_sample", "fully_use_cnn"])
     parser.add_argument("--len_vis_input", type=int, default=256, help="The length of visual token input")  # visual token의 fixed length를 100이라 하면, <Unknown> token 100개가 되고, 100개의 word 생성 가능.
@@ -110,7 +111,7 @@ def main():
     parser.add_argument("--finetune_decay", action="store_true", help="Weight decay to the original weights.")
     parser.add_argument("--warmup_proportion", default=0.1, type=float, help="Proportion of training to perform linear learning rate warmup for. " "E.g., 0.1 = 10%% of training.")
     parser.add_argument("--no_cuda", action="store_true", help="Whether not to use CUDA when available")
-    parser.add_argument("--seed", type=int, default=1234, help="random seed for initialization")
+    parser.add_argument("--seed", type=int, default=123, help="random seed for initialization")
 
     parser.add_argument("--fp16", action="store_true", default=False, help="Whether to use 16-bit float precision instead of 32-bit")
     parser.add_argument("--fp32_embedding", action="store_true", default=False, help="Whether to use 32-bit float precision instead of 32-bit for embeddings")
@@ -159,7 +160,9 @@ def main():
     else:
         args.exp_name = "finetune_only"
     # args.output_dir = args.output_dir+'/revision/'+str(args.tasks)+'/'+args.generation_dataset+'_'+args.exp_name
-    args.output_dir = args.output_dir + "revision/" + str(args.tasks) + "/" + args.model_recover_path.split("/")[-3] + "_" + args.generation_dataset + "_" + args.exp_name
+    # args.output_dir = args.output_dir + "revision/" + str(args.tasks) + "/" + args.model_recover_path.split("/")[-3] + "_" + args.generation_dataset + "_" + args.exp_name
+    args.output_dir = os.path.join(args.output_dir, f"""{args.model_recover_path.split("/")[-3]}_{args.exp_name}""")
+
     print("args.output_dir", args.output_dir)
     print("global_rank: {}, local rank: {}".format(args.global_rank, args.local_rank))
 
@@ -248,7 +251,7 @@ def main():
     # if args.wandb and utils.is_main_process():
     if args.wandb and is_main_process():
         # wandb.init(config=args, project="report_gen", entity="mimic-cxr", name=args.exp_name, reinit=True)
-        wandb.init(config=args, project="med-vqa", entity="mimic-cxr", name=args.exp_name, reinit=True)
+        wandb.init(config=args, project="", entity="", name=args.exp_name, reinit=True)
 
     tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=True)
 
@@ -393,7 +396,8 @@ def main():
         torch.cuda.empty_cache()
 
     model.to(device)
-    if args.wandb and utils.is_main_process():
+    # if args.wandb and utils.is_main_process():
+    if args.wandb and is_main_process():
         wandb.watch(model)
 
     try:
@@ -615,7 +619,7 @@ def vqa_eval(args, device, logger, bi_uni_pipeline, tokenizer, model, results_di
         torch.cuda.empty_cache()
         end = time.time()
         print(end - start)
-        exit()
+        # exit()
     return (total_vqa_acc / len(test_loss)) * 100, (total_closed_acc / num_close) * 100, (total_open_acc / num_open) * 100
 
 
